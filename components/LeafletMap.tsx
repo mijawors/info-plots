@@ -47,49 +47,72 @@ const coloredIcon = (color: string) =>
   });
 
 // --- Buffered WMS layer to prevent label/line clipping at tile boundaries ---
+// We request (TILE_SIZE + 2*BUFFER)² images with an expanded BBOX, then CSS-crop
+// back to TILE_SIZE so labels near edges have room to render fully on the server.
 const TILE_SIZE = 512;
-const BUFFER = 128; // extra px on each side → server renders (512+256)×(512+256)
+const BUFFER = 256; // 50 % extra on each side → server renders 1024×1024
 
 function GugikWMS() {
   const map = useMap();
   useEffect(() => {
-    const GugikLayer = (L.TileLayer.WMS as unknown as { extend: (opts: object) => new (...a: unknown[]) => L.TileLayer.WMS }).extend({
+    const crs = map.options.crs ?? L.CRS.EPSG3857;
+    const expanded = TILE_SIZE + 2 * BUFFER;
+
+    const GugikLayer = (L.TileLayer.WMS as unknown as {
+      extend: (opts: object) => new (...a: unknown[]) => L.TileLayer.WMS;
+    }).extend({
       getTileUrl(coords: L.Coords) {
-        const expanded = TILE_SIZE + 2 * BUFFER;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const self = this as any;
-        const nwPoint = coords.scaleBy(L.point(TILE_SIZE, TILE_SIZE));
-        const sePoint = nwPoint.add(L.point(TILE_SIZE, TILE_SIZE));
-        const crs = map.options.crs ?? L.CRS.EPSG3857;
-        const zoom = self._getZoomForUrl();
-        const nw = crs.pointToLatLng(L.point(nwPoint.x, nwPoint.y), zoom);
-        const se = crs.pointToLatLng(L.point(sePoint.x, sePoint.y), zoom);
-        const swProj = crs.project(L.latLng(se.lat, nw.lng));
-        const neProj = crs.project(L.latLng(nw.lat, se.lng));
-        const bx = (neProj.x - swProj.x) * (BUFFER / TILE_SIZE);
-        const by = (neProj.y - swProj.y) * (BUFFER / TILE_SIZE);
+        // Use map.unproject (same path Leaflet's own WMS uses internally).
+        const tileSize = L.point(TILE_SIZE, TILE_SIZE);
+        const nwPx = coords.scaleBy(tileSize);
+        const sePx = nwPx.add(tileSize);
+        const nw = map.unproject(nwPx, coords.z);
+        const se = map.unproject(sePx, coords.z);
+        // Project to EPSG:3857 metres, then find the four BBOX edges.
+        const nwM = crs.project(nw);
+        const seM = crs.project(se);
+        const west  = Math.min(nwM.x, seM.x);
+        const east  = Math.max(nwM.x, seM.x);
+        const south = Math.min(nwM.y, seM.y);
+        const north = Math.max(nwM.y, seM.y);
+        const bx = (east  - west)  * (BUFFER / TILE_SIZE);
+        const by = (north - south) * (BUFFER / TILE_SIZE);
         const params = new URLSearchParams({
           SERVICE: 'WMS', VERSION: '1.1.1', REQUEST: 'GetMap',
           LAYERS: 'dzialki,numery_dzialek',
           FORMAT: 'image/png', TRANSPARENT: 'true',
           SRS: 'EPSG:3857',
-          BBOX: `${swProj.x - bx},${swProj.y - by},${neProj.x + bx},${neProj.y + by}`,
+          BBOX: `${west - bx},${south - by},${east + bx},${north + by}`,
           WIDTH: String(expanded), HEIGHT: String(expanded),
         });
         return `${GUGIK_WMS}?${params.toString()}`;
       },
       createTile(coords: L.Coords, done: L.DoneCallback) {
-        const expanded = TILE_SIZE + 2 * BUFFER;
         const div = L.DomUtil.create('div') as HTMLDivElement;
         div.style.cssText = `width:${TILE_SIZE}px;height:${TILE_SIZE}px;overflow:hidden;`;
-        const img = document.createElement('img');
-        img.style.cssText = `display:block;width:${expanded}px;height:${expanded}px;margin:-${BUFFER}px 0 0 -${BUFFER}px;`;
-        img.crossOrigin = '';
-        img.addEventListener('load', () => done(undefined, div));
-        img.addEventListener('error', () => done(new Error('tile load failed'), div));
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        img.src = (this as any).getTileUrl(coords);
-        div.appendChild(img);
+        const url = (this as any).getTileUrl(coords) as string;
+        const MAX_ATTEMPTS = 3;
+        let attempt = 0;
+        const tryLoad = () => {
+          attempt++;
+          const img = document.createElement('img');
+          img.style.cssText = `display:block;width:${expanded}px;height:${expanded}px;margin:-${BUFFER}px 0 0 -${BUFFER}px;`;
+          img.addEventListener('load', () => {
+            div.replaceChildren(img);
+            done(undefined, div);
+          });
+          img.addEventListener('error', () => {
+            if (attempt < MAX_ATTEMPTS) {
+              setTimeout(tryLoad, 300 * attempt);
+            } else {
+              done(new Error('tile load failed'), div);
+            }
+          });
+          // Cache-bust on retry so the browser actually re-requests instead of replaying the cached failure.
+          img.src = attempt === 1 ? url : `${url}&_r=${attempt}`;
+        };
+        tryLoad();
         return div;
       },
     });
@@ -98,6 +121,7 @@ function GugikWMS() {
       tileSize: TILE_SIZE,
       opacity: 0.7,
       keepBuffer: 3,
+      maxZoom: MAX_ZOOM,
     });
     layer.addTo(map);
     return () => { map.removeLayer(layer); };
@@ -151,6 +175,7 @@ export default function LeafletMap() {
       <TileLayer
         attribution="&copy; OpenStreetMap contributors"
         url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+        maxZoom={MAX_ZOOM}
       />
       <GugikWMS />
       <ClickHandler />
