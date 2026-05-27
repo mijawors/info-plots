@@ -131,27 +131,25 @@ function GugikWMS() {
 
 function ClickHandler() {
   const addPlot = useStore((s) => s.addPlot);
-  const updatePlot = useStore((s) => s.updatePlot);
 
   useMapEvents({
     click: async (e) => {
       const { lat, lng } = e.latlng;
-      const id = addPlot(lat, lng, { title: 'Loading parcel…' });
       try {
         const parcel = await fetchParcelAt(lat, lng);
         if (parcel) {
-          updatePlot(id, {
+          addPlot(lat, lng, {
             polygon: parcel.polygon,
             parcelId: parcel.parcelId,
             address: parcel.address,
             title: parcel.address || 'New plot',
           });
-        } else {
-          updatePlot(id, { title: 'New plot' });
+          return;
         }
       } catch {
-        updatePlot(id, { title: 'New plot' });
+        // fall through to marker fallback
       }
+      addPlot(lat, lng, { title: 'New plot' });
     },
   });
   return null;
