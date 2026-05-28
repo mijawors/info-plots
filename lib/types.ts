@@ -24,5 +24,9 @@ export interface Plot {
   phone?: string;
   contactName?: string;
   notes?: string;
+  listingUrl?: string;
+  tags?: string[];
+  /** ISO date, e.g. "2026-05-12". */
+  visitedAt?: string;
   createdAt: number;
 }
